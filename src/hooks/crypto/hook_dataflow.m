@@ -148,7 +148,7 @@ static NSString *hooked_pctenc(id self, SEL cmd, NSCharacterSet *cs) {
     NSString *r = orig_pctenc(self, cmd, cs);
     if (dh_capture_sub_enabled(DH_CAP_DATAFLOW) && df_active() &&
         r.length > 0 && r.length < 8192) {
-        df_log(@"URL编码", r, nil, @"stringByAddingPercentEncoding");
+        df_log(@"URL编码", [r dataUsingEncoding:NSUTF8StringEncoding], nil, @"stringByAddingPercentEncoding");
     }
     return r;
 }

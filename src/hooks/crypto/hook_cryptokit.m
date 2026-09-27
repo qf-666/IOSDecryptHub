@@ -18,6 +18,7 @@
 #import <objc/runtime.h>
 #import <dlfcn.h>
 #include <string.h>
+#include <libkern/OSCacheControl.h>
 #include "log_store.h"
 #define DH_BOARD DH_DIAG_CRYPTO
 #import "dh_health.h"
@@ -104,7 +105,7 @@ static __thread int g_in_ck = 0;   // 重入保护
 
 // =================== 处理器 (asm 调用) ===================
 // gpr[0..8] = 原 x0..x8。x1 通常是 Data 首地址, x8 是间接返回缓冲。
-static void dh_ck_handler(int slot, uint64_t *gpr, uint64_t caller_sp, uint64_t lr) {
+void dh_ck_handler(int slot, uint64_t *gpr, uint64_t caller_sp, uint64_t lr) {
     (void)caller_sp; (void)lr;
     if (g_in_ck) return;                 // 防递归
     if (!dh_capture_sub_enabled(DH_CAP_SWIFT_HASH)) return;
@@ -200,7 +201,7 @@ void dh_install_cryptokit_hooks(void) {
         code[0] = 0xD2800000u | ((uint32_t)slot << 5) | 17u;
         // b imm26 = 0x14000000 | ((delta >> 2) & 0x03FFFFFF)
         code[1] = 0x14000000u | (((int64_t)delta >> 2) & 0x03FFFFFF);
-        __builtin___clear_cache((char *)code, (char *)(code + 2));
+        sys_icache_invalidate((void *)code, 8);   // iOS 上刷指令缓存
         installed++;
     }
     // 不告警: CryptoKit 未加载是环境差异, 非本模块失效。
