@@ -21,6 +21,7 @@ static const char *kSubNames[DH_CAP_SUB_COUNT] = {
     "KEYCHAIN",
     "ENV_PROBE",
     "NETWORK",
+    "SWIFT_HASH", "CCDIGEST", "DATAFLOW", "STRING_BRIDGE",
 };
 
 static void set_defaults(void) {

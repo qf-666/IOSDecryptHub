@@ -30,6 +30,10 @@ typedef enum {
     DH_CAP_KEYCHAIN,       // SecItem* Keychain 查询/增改删 (token/密码存取)
     DH_CAP_ENV_PROBE,      // 环境探测观测 (sysctl/uname/getenv/ptrace/csops/stat/access)
     DH_CAP_NETWORK,        // 网络: NSURLSession 请求 + SSL_write/read 明文
+    DH_CAP_SWIFT_HASH,     // Swift CryptoKit 摘要 (SHA256.hash 等) —— CommonCrypto 导出符号之外的路径
+    DH_CAP_CCDIGEST,       // corecrypto ccdigest 层 (不导出符号, CryptoKit 内联后落点)
+    DH_CAP_DATAFLOW,       // 数据流: 序列化/拼接/编码 (业务参数 -> 哈希输入 的中间环节)
+    DH_CAP_STRING_BRIDGE,  // 明文桥: NSString.dataUsingEncoding (Data 指纹 -> 明文)
     DH_CAP_SUB_COUNT
 } dh_cap_sub;
 

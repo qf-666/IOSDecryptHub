@@ -16,6 +16,9 @@
 #import "hook_webkit.h"
 
 extern void dh_install_digest_hooks(void);
+extern void dh_install_ccdigest_hooks(void);      // corecrypto 层 (Swift/CryptoKit)
+extern void dh_install_cryptokit_hooks(void);     // CryptoKit Swift mangled 符号
+extern void dh_install_dataflow_hooks(void);      // 数据流: 序列化/拼接/编码
 extern void dh_install_hmac_hooks(void);
 extern void dh_install_symmetric_hooks(void);
 extern void dh_install_asymmetric_hooks(void);
@@ -32,6 +35,9 @@ extern void dh_install_webkit_hooks(void);
 
 static void dh_install_all_hooks(void) {
     dh_install_digest_hooks();
+    dh_install_ccdigest_hooks();
+    dh_install_cryptokit_hooks();
+    dh_install_dataflow_hooks();
     dh_install_hmac_hooks();
     dh_install_symmetric_hooks();
     dh_install_asymmetric_hooks();

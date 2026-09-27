@@ -55,6 +55,9 @@ SRC     := src/core/fishhook.c \
            src/core/dh_files.m \
            src/core/analysis.m \
            src/hooks/crypto/hook_digest.m \
+           src/hooks/crypto/hook_ccdigest.m \
+           src/hooks/crypto/hook_cryptokit.m \
+           src/hooks/crypto/hook_dataflow.m \
            src/hooks/crypto/hook_hmac.m \
            src/hooks/crypto/hook_symmetric.m \
            src/hooks/crypto/hook_asymmetric.m \
