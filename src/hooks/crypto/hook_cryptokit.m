@@ -146,21 +146,32 @@ void dh_ck_handler(int slot, uint64_t *gpr, uint64_t caller_sp, uint64_t lr) {
 // 而签名串在哈希前多以字符串形态经过 dataUsingEncoding:, 记下即得可读明文。
 // 关联在读取侧按 timestampMs + threadId 做, 不用全局字典即时反查(避免并发/生命周期纠缠)。
 static NSData *(*orig_dataUsingEncoding)(id, SEL, NSStringEncoding);
+static __thread int g_ck_in_hook = 0;
+
 static void dh_ck_record_string_bridge(NSString *s, NSData *d, NSStringEncoding enc);
 
 static NSData *hooked_dataUsingEncoding(id self, SEL cmd, NSStringEncoding enc) {
-    NSData *d = orig_dataUsingEncoding(self, cmd, enc);
-    if (!dh_capture_sub_enabled(DH_CAP_STRING_BRIDGE)) return d;
-    if (d.length > 0 && d.length <= 16384 &&
-        (enc == NSUTF8StringEncoding || enc == NSUnicodeStringEncoding)) {
-        NSString *s = (NSString *)self;
-        if ([s isKindOfClass:[NSString class]] && s.length > 0 && s.length <= 4096) {
-            // 记录逻辑挪到独立函数: 内部取 UTF8 bytes 必须走 orig_* 透传,
-            // 不能再调 [s dataUsingEncoding:] —— 那会重新进入本 hook, 无限递归撞栈。
-            dh_ck_record_string_bridge(s, d, enc);
-        }
+    if (g_ck_in_hook) {
+        // 嵌套调用 (本模块记录路径内部触发) —— 直接放行, 断开递归环。
+        return orig_dataUsingEncoding(self, cmd, enc);
     }
-    return d;
+    g_ck_in_hook = 1;
+    @try {
+        NSData *d = orig_dataUsingEncoding(self, cmd, enc);
+        if (!dh_capture_sub_enabled(DH_CAP_STRING_BRIDGE)) return d;
+        if (d.length > 0 && d.length <= 16384 &&
+            (enc == NSUTF8StringEncoding || enc == NSUnicodeStringEncoding)) {
+            NSString *s = (NSString *)self;
+            if ([s isKindOfClass:[NSString class]] && s.length > 0 && s.length <= 4096) {
+                // 记录逻辑挪到独立函数: 内部取 UTF8 bytes 必须走 orig_* 透传,
+                // 不能再调 [s dataUsingEncoding:] —— 那会重新进入本 hook, 无限递归撞栈。
+                dh_ck_record_string_bridge(s, d, enc);
+            }
+        }
+        return d;
+    } @finally {
+        g_ck_in_hook = 0;
+    }
 }
 
 // 递归安全的记录: 用已 orig 过的函数取 bytes, 绝不重新进入 hooked_dataUsingEncoding。

@@ -42,21 +42,26 @@ static int df_active(void) {
 
 // =================== 统一记录 ===================
 #define DH_DF_CAP 4096
-// hook 内部禁止用 [str dataUsingEncoding:] —— 那会重新进入被 hook 的同名方法,
-// 无限递归撞栈 (上次注入后 SIGBUS 就是这个原因)。统一改走 CoreFoundation 的
-// C 接口取 UTF8 bytes, 完全绕开 ObjC 方法分发。
+// hook 内部禁止用 [str dataUsingEncoding:] / [NSData dataWithBytes:length:] /
+// [NSMutableData dataWithLength:] —— 前者换了 dataUsingEncoding: 的 IMP,
+// 后两者内部会调 -[NSData initWithBytes:length:] (被本模块 hook),
+// 在 hook 记录路径上再调会无限递归撞栈 (已出现过两次 SIGBUS/SIGSEGV)。
+// 统一改走 CoreFoundation 的 C 接口 + malloc 栈外缓冲 + dataWithBytesNoCopy。
 static NSData *df_utf8(NSString *s) {
     if (!s || s.length == 0 || s.length > 8192) return nil;
     CFStringRef cs = (__bridge CFStringRef)s;
-    CFIndex n = 0;
-    CFIndex need = CFStringGetBytes(cs, CFRangeMake(0, CFStringGetLength(cs)),
-                                    kCFStringEncodingUTF8, 0, false, NULL, 0, &n);
+    CFIndex len = CFStringGetLength(cs);
+    CFIndex need = 0;
+    CFStringGetBytes(cs, CFRangeMake(0, len), kCFStringEncodingUTF8, 0, false, NULL, 0, &need);
     if (need <= 0 || need > (CFIndex)DH_DF_CAP) return nil;
-    NSMutableData *md = [NSMutableData dataWithLength:(NSUInteger)need];
-    CFStringGetBytes(cs, CFRangeMake(0, CFStringGetLength(cs)),
-                     kCFStringEncodingUTF8, 0, false,
-                     [md mutableBytes], need, &n);
-    return md;
+    void *buf = malloc((size_t)need);
+    if (!buf) return nil;
+    CFIndex n = 0;
+    CFStringGetBytes(cs, CFRangeMake(0, len), kCFStringEncodingUTF8, 0, false,
+                     buf, need, &n);
+    // dataWithBytesNoCopy: 不走 -[NSData initWithBytes:length:], 无递归风险。
+    return [NSData dataWithBytesNoCopy:buf length:(NSUInteger)need
+                              freeWhenDone:YES];
 }
 static void df_log(NSString *stage, NSData *in, NSData *out, NSString *detail) {
     DHLogEntry *e = [DHLogEntry new];
@@ -70,7 +75,11 @@ static void df_log(NSString *stage, NSData *in, NSData *out, NSString *detail) {
 }
 static NSData *df_bytes(const void *p, NSUInteger n) {
     if (!p || !n) return nil;
-    return [NSData dataWithBytes:p length:MIN(n, (NSUInteger)DH_DF_CAP)];
+    NSUInteger len = MIN(n, (NSUInteger)DH_DF_CAP);
+    void *buf = malloc(len);
+    if (!buf) return nil;
+    memcpy(buf, p, len);
+    return [NSData dataWithBytesNoCopy:buf length:len freeWhenDone:YES];
 }
 
 // =================== A. 序列化 ===================
@@ -171,13 +180,31 @@ static NSString *hooked_pctenc(id self, SEL cmd, NSCharacterSet *cs) {
 
 // =================== D. 转码 ===================
 // -[NSData initWithBytes:length:]
+//
+// ★ 递归保护: 本模块各 hook 的记录路径 (df_utf8/df_bytes 之外的旧模块:
+// digest/hmac/symmetric/asymmetric/evp/network/file 也都在 hook 内部调
+// [NSData dataWithBytes:length:]), 该类方法内部会调 -[NSData initWithBytes:length:],
+// 也就是回到本 hook。没有保护会无限递归撞栈 (已实测到 SIGSEGV)。
+// 用 thread-local 计数: 进入本 hook 时置位, 其间发生的所有嵌套调用一律放行不记录。
+#include <pthread.h>
+static __thread int g_df_in_hook = 0;
+
 static id (*orig_init_bytes)(id, SEL, const void *, NSUInteger);
 static id hooked_init_bytes(id self, SEL cmd, const void *bytes, NSUInteger len) {
-    id r = orig_init_bytes(self, cmd, bytes, len);
-    if (dh_capture_sub_enabled(DH_CAP_DATAFLOW) && df_active()) {
-        df_log(@"字节转Data", df_bytes(bytes, len), nil, @"initWithBytes:length:");
+    if (g_df_in_hook) {
+        // 嵌套调用 (来自其他 hook 的记录路径) —— 直接放行, 不记录, 断开递归环。
+        return orig_init_bytes(self, cmd, bytes, len);
     }
-    return r;
+    g_df_in_hook = 1;
+    @try {
+        id r = orig_init_bytes(self, cmd, bytes, len);
+        if (dh_capture_sub_enabled(DH_CAP_DATAFLOW) && df_active()) {
+            df_log(@"字节转Data", df_bytes(bytes, len), nil, @"initWithBytes:length:");
+        }
+        return r;
+    } @finally {
+        g_df_in_hook = 0;
+    }
 }
 
 // =================== 安装 ===================
