@@ -67,14 +67,14 @@ static void dh_bootstrap(void) {
     dh_noise_load([docsDir stringByAppendingPathComponent:@".dh_noise.conf"]);
     dh_spoof_load([docsDir stringByAppendingPathComponent:@".dh_spoof.conf"]);
     dh_webkit_probe_load([docsDir stringByAppendingPathComponent:@".dh_webkit_probe.conf"]);
-    // 安装 hook —— 尽早完成, 否则早期发生的加解密会漏抓.
-    dh_install_all_hooks();
-    dh_diag_append(DH_DIAG_GENERAL, "INFO", "hook 安装完成 (Digest/HMAC/对称/非对称/KDF/EVP/文件/系统)");
-    NSLog(@"[IOSDecryptHub] hook 已全部安装 (Digest / HMAC / 对称 / 非对称 / KDF / EVP / 文件 / 系统 / dlsym)");
-
-    // 本地 HTTP 服务放到后台起: constructor 处在宿主 launch 的看门狗预算里
-    // (实测 B站 launch 阶段被 0x8badf00d 杀掉), 起 socket/线程不该抢这段时间。
+    // hook 安装全部挪到后台线程 —— 之前在主线程(构造函数)里同步装, 网络钩子里
+    // [NSURLSession sharedSession] 的懒初始化会在宿主 launch 早期死锁主线程 → 白屏。
+    // 后台安装会漏掉极早期(launch 阶段)的加解密, 但绝大多数业务发生在界面起来之后,
+    // 白屏是launch 都过不去, 权衡之下必选后台。HTTP 服务同批起。
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+        dh_install_all_hooks();
+        dh_diag_append(DH_DIAG_GENERAL, "INFO", "hook 安装完成 (Digest/HMAC/对称/非对称/KDF/EVP/文件/系统)");
+        NSLog(@"[IOSDecryptHub] hook 已全部安装 (后台线程)");
         dh_http_start();
     });
 

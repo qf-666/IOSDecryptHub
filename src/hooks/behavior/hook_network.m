@@ -650,8 +650,10 @@ static void install_resume_hook(void) {
 }
 
 static void install_urlsession_hook(void) {
-    // 配对: 在「shared session 的真实类」上换 completion 建任务方法 (custom session 同为该私有类)
-    Class sc = object_getClass([NSURLSession sharedSession]) ?: NSClassFromString(@"NSURLSession");
+    // 不能在 hook 安装阶段调 [NSURLSession sharedSession] —— 它会触发网络栈懒初始化,
+    // 在宿主 launch 早期(主线程)死锁, 表现为白屏。改用类查找, 不实例化任何对象。
+    Class sc = NSClassFromString(@"__NSURLSessionLocal");
+    if (!sc) sc = NSClassFromString(@"NSURLSession");
     swz_instance(sc, @selector(dataTaskWithRequest:completionHandler:),          (IMP)swz_dtReqCH, (IMP *)&orig_dtReqCH);
     swz_instance(sc, @selector(dataTaskWithURL:completionHandler:),              (IMP)swz_dtURLCH, (IMP *)&orig_dtURLCH);
     swz_instance(sc, @selector(uploadTaskWithRequest:fromData:completionHandler:),(IMP)swz_upReqCH, (IMP *)&orig_upReqCH);
