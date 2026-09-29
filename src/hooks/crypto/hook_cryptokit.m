@@ -146,6 +146,8 @@ void dh_ck_handler(int slot, uint64_t *gpr, uint64_t caller_sp, uint64_t lr) {
 // 而签名串在哈希前多以字符串形态经过 dataUsingEncoding:, 记下即得可读明文。
 // 关联在读取侧按 timestampMs + threadId 做, 不用全局字典即时反查(避免并发/生命周期纠缠)。
 static NSData *(*orig_dataUsingEncoding)(id, SEL, NSStringEncoding);
+static void dh_ck_record_string_bridge(NSString *s, NSData *d, NSStringEncoding enc);
+
 static NSData *hooked_dataUsingEncoding(id self, SEL cmd, NSStringEncoding enc) {
     NSData *d = orig_dataUsingEncoding(self, cmd, enc);
     if (!dh_capture_sub_enabled(DH_CAP_STRING_BRIDGE)) return d;
@@ -153,17 +155,26 @@ static NSData *hooked_dataUsingEncoding(id self, SEL cmd, NSStringEncoding enc) 
         (enc == NSUTF8StringEncoding || enc == NSUnicodeStringEncoding)) {
         NSString *s = (NSString *)self;
         if ([s isKindOfClass:[NSString class]] && s.length > 0 && s.length <= 4096) {
-            DHLogEntry *e = [DHLogEntry new];
-            e.category  = DHCategoryDigest;
-            e.algorithm = @"STRING->DATA";
-            e.operation = @"convert";
-            e.input     = [s dataUsingEncoding:NSUTF8StringEncoding];
-            e.output    = d;
-            e.detail    = @"明文桥（哈希前可读的业务串）";
-            [[DHLogStore shared] append:e];
+            // 记录逻辑挪到独立函数: 内部取 UTF8 bytes 必须走 orig_* 透传,
+            // 不能再调 [s dataUsingEncoding:] —— 那会重新进入本 hook, 无限递归撞栈。
+            dh_ck_record_string_bridge(s, d, enc);
         }
     }
     return d;
+}
+
+// 递归安全的记录: 用已 orig 过的函数取 bytes, 绝不重新进入 hooked_dataUsingEncoding。
+static void dh_ck_record_string_bridge(NSString *s, NSData *d, NSStringEncoding enc) {
+    DHLogEntry *e = [DHLogEntry new];
+    e.category  = DHCategoryDigest;
+    e.algorithm = @"STRING->DATA";
+    e.operation = @"convert";
+    // 直接用原函数返回的 d 作输入; 若编码不是 UTF8, 再用 orig 透传取一次 UTF8。
+    e.input     = (enc == NSUTF8StringEncoding) ? d
+                    : orig_dataUsingEncoding(s, @selector(dataUsingEncoding:), NSUTF8StringEncoding);
+    e.output    = d;
+    e.detail    = @"明文桥（哈希前可读的业务串）";
+    [[DHLogStore shared] append:e];
 }
 
 // =================== 安装 ===================

@@ -38,6 +38,21 @@ static NSRecursiveLock *g_dh_wk_probe_lock = nil;
 // 数据转换 / 记录
 // ============================================================
 
+static NSData *dh_wk_utf8(NSString *s) {
+    if (!s) return nil;
+    CFStringRef cs = (__bridge CFStringRef)s;
+    CFIndex len = CFStringGetLength(cs);
+    if (len == 0) return nil;
+    CFIndex need = 0;
+    CFStringGetBytes(cs, CFRangeMake(0, len), kCFStringEncodingUTF8, 0, false, NULL, 0, &need);
+    if (need <= 0) return nil;
+    NSMutableData *md = [NSMutableData dataWithLength:(NSUInteger)need];
+    CFIndex n = 0;
+    CFStringGetBytes(cs, CFRangeMake(0, len), kCFStringEncodingUTF8, 0, false,
+                     [md mutableBytes], need, &n);
+    return md;
+}
+
 static NSData *dh_wk_data(id object) {
     if (!object) return nil;
     NSData *data = nil;
@@ -45,11 +60,12 @@ static NSData *dh_wk_data(id object) {
         if ([object isKindOfClass:[NSData class]]) {
             data = object;
         } else if ([object isKindOfClass:[NSString class]]) {
-            data = [(NSString *)object dataUsingEncoding:NSUTF8StringEncoding];
+            // 不能调 dataUsingEncoding: —— 明文桥 hook 换了它的 IMP, 会无限递归。
+            data = dh_wk_utf8((NSString *)object);
         } else if ([NSJSONSerialization isValidJSONObject:object]) {
             data = [NSJSONSerialization dataWithJSONObject:object options:0 error:nil];
         } else {
-            data = [[object description] dataUsingEncoding:NSUTF8StringEncoding];
+            data = dh_wk_utf8([object description]);
         }
     } @catch (__unused NSException *e) {
         data = nil;

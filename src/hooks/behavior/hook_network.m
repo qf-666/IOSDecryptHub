@@ -31,6 +31,23 @@
 #import <sys/uio.h>
 #import <netinet/in.h>
 #import <arpa/inet.h>
+
+// hook 内部取 UTF8 bytes 禁止走 -[NSString dataUsingEncoding:]:
+// 明文桥 hook 换掉了它的 IMP, 再调会无限递归撞栈。统一改 CF 的 C 接口。
+static NSData *dh_net_utf8(NSString *s) {
+    if (!s) return nil;
+    CFStringRef cs = (__bridge CFStringRef)s;
+    CFIndex len = CFStringGetLength(cs);
+    if (len == 0) return nil;
+    CFIndex need = 0;
+    CFStringGetBytes(cs, CFRangeMake(0, len), kCFStringEncodingUTF8, 0, false, NULL, 0, &need);
+    if (need <= 0) return nil;
+    NSMutableData *md = [NSMutableData dataWithLength:(NSUInteger)need];
+    CFIndex n = 0;
+    CFStringGetBytes(cs, CFRangeMake(0, len), kCFStringEncodingUTF8, 0, false,
+                     [md mutableBytes], need, &n);
+    return md;
+}
 #import <netdb.h>
 #import <pthread.h>
 #include <errno.h>
@@ -676,7 +693,7 @@ static void dh_ws_log_message(id message, NSString *op, NSString *detail) {
         }
         if (!body.length && [message respondsToSelector:@selector(string)]) {
             NSString *s = [message string];
-            if (s.length) { body = [s dataUsingEncoding:NSUTF8StringEncoding]; kind = @"string"; }
+            if (s.length) { body = dh_net_utf8(s); kind = @"string"; }
         }
     } @catch (__unused NSException *e) {}
     if (!body.length) return;

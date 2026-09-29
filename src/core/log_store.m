@@ -7,6 +7,24 @@
 #import "dh_log_json.h"
 #import <sys/sysctl.h>
 #import <sys/time.h>
+
+// 本仓的明文桥 hook 换掉了 -[NSString dataUsingEncoding:] 的 IMP。
+// 记录路径(hook 内部)若再调该方法会无限递归撞栈 —— 所有落盘编码统一改走
+// CoreFoundation 的 C 接口, 绕开 ObjC 方法分发。
+static NSData *dh_utf8_cf(NSString *s) {
+    if (!s) return nil;
+    CFStringRef cs = (__bridge CFStringRef)s;
+    CFIndex len = CFStringGetLength(cs);
+    if (len == 0) return nil;
+    CFIndex need = 0;
+    CFStringGetBytes(cs, CFRangeMake(0, len), kCFStringEncodingUTF8, 0, false, NULL, 0, &need);
+    if (need <= 0) return nil;
+    NSMutableData *md = [NSMutableData dataWithLength:(NSUInteger)need];
+    CFIndex n = 0;
+    CFStringGetBytes(cs, CFRangeMake(0, len), kCFStringEncodingUTF8, 0, false,
+                     [md mutableBytes], need, &n);
+    return md;
+}
 #import <stdatomic.h>
 #import <mach/mach.h>
 #import <pthread.h>
@@ -76,7 +94,7 @@ static NSData *dh_journal_bounded(NSData *data, NSUInteger maxBytes) {
 
 static NSString *dh_journal_bounded_string(NSString *s, NSUInteger maxBytes) {
     if (!s.length) return nil;
-    NSData *d = [s dataUsingEncoding:NSUTF8StringEncoding];
+    NSData *d = dh_utf8_cf(s);
     if (!d || d.length <= maxBytes) return s;
     NSUInteger n = maxBytes;
     while (n > 0) {
@@ -715,7 +733,7 @@ static NSMutableString *dh_entry_block(DHLogEntry *e) {
 
 - (void)_persist:(DHLogEntry *)e noisy:(BOOL)noisy {
     NSMutableString *s = dh_entry_block(e);
-    NSData *bytes = [s dataUsingEncoding:NSUTF8StringEncoding];
+    NSData *bytes = dh_utf8_cf(s);
     if (!bytes) { DH_ERR(@"日志 UTF-8 编码失败, 丢弃 #%llu", (unsigned long long)e.seq); return; }
     // 文本日志批量落盘: 先进 64KB 缓冲, 满缓冲或 150ms 到点再 write 一次。
     if (!_writeBuf) _writeBuf = [NSMutableData dataWithCapacity:kFlushBufferBytes];

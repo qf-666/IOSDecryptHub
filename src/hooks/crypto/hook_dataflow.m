@@ -42,6 +42,22 @@ static int df_active(void) {
 
 // =================== 统一记录 ===================
 #define DH_DF_CAP 4096
+// hook 内部禁止用 [str dataUsingEncoding:] —— 那会重新进入被 hook 的同名方法,
+// 无限递归撞栈 (上次注入后 SIGBUS 就是这个原因)。统一改走 CoreFoundation 的
+// C 接口取 UTF8 bytes, 完全绕开 ObjC 方法分发。
+static NSData *df_utf8(NSString *s) {
+    if (!s || s.length == 0 || s.length > 8192) return nil;
+    CFStringRef cs = (__bridge CFStringRef)s;
+    CFIndex n = 0;
+    CFIndex need = CFStringGetBytes(cs, CFRangeMake(0, CFStringGetLength(cs)),
+                                    kCFStringEncodingUTF8, 0, false, NULL, 0, &n);
+    if (need <= 0 || need > (CFIndex)DH_DF_CAP) return nil;
+    NSMutableData *md = [NSMutableData dataWithLength:(NSUInteger)need];
+    CFStringGetBytes(cs, CFRangeMake(0, CFStringGetLength(cs)),
+                     kCFStringEncodingUTF8, 0, false,
+                     [md mutableBytes], need, &n);
+    return md;
+}
 static void df_log(NSString *stage, NSData *in, NSData *out, NSString *detail) {
     DHLogEntry *e = [DHLogEntry new];
     e.category  = DHCategoryDigest;
@@ -75,7 +91,7 @@ static NSString *hooked_dict_desc(id self, SEL cmd) {
     NSString *s = orig_dict_desc(self, cmd);
     if (dh_capture_sub_enabled(DH_CAP_DATAFLOW) && df_active() &&
         s.length > 0 && s.length < 8192) {
-        df_log(@"字典描述", [s dataUsingEncoding:NSUTF8StringEncoding], nil,
+        df_log(@"字典描述", df_utf8(s), nil,
                @"NSDictionary description");
     }
     return s;
@@ -85,7 +101,7 @@ static NSString *hooked_arr_desc(id self, SEL cmd) {
     NSString *s = orig_arr_desc(self, cmd);
     if (dh_capture_sub_enabled(DH_CAP_DATAFLOW) && df_active() &&
         s.length > 0 && s.length < 8192) {
-        df_log(@"数组描述", [s dataUsingEncoding:NSUTF8StringEncoding], nil,
+        df_log(@"数组描述", df_utf8(s), nil,
                @"NSArray description");
     }
     return s;
@@ -98,7 +114,7 @@ static NSString *hooked_append(id self, SEL cmd, NSString *a) {
     NSString *r = orig_append(self, cmd, a);
     if (dh_capture_sub_enabled(DH_CAP_DATAFLOW) && df_active() &&
         r.length > 0 && r.length < 8192) {
-        df_log(@"字符串拼接", [r dataUsingEncoding:NSUTF8StringEncoding], nil,
+        df_log(@"字符串拼接", df_utf8(r), nil,
                @"stringByAppendingString:");
     }
     return r;
@@ -109,7 +125,7 @@ static NSString *hooked_join(id self, SEL cmd, NSString *sep) {
     NSString *r = orig_join(self, cmd, sep);
     if (dh_capture_sub_enabled(DH_CAP_DATAFLOW) && df_active() &&
         r.length > 0 && r.length < 8192) {
-        df_log(@"数组连接", [r dataUsingEncoding:NSUTF8StringEncoding], nil,
+        df_log(@"数组连接", df_utf8(r), nil,
                [NSString stringWithFormat:@"componentsJoinedByString:@%@", sep]);
     }
     return r;
@@ -123,7 +139,7 @@ static id hooked_init_fmt(id self, SEL cmd, NSString *fmt, va_list ap) {
     if (dh_capture_sub_enabled(DH_CAP_DATAFLOW) && df_active()) {
         NSString *s = (NSString *)r;
         if (s.length > 0 && s.length < 8192) {
-            df_log(@"格式化拼接", [s dataUsingEncoding:NSUTF8StringEncoding], nil,
+            df_log(@"格式化拼接", df_utf8(s), nil,
                    [NSString stringWithFormat:@"initWithFormat:@%@", fmt]);
         }
     }
@@ -138,7 +154,7 @@ static NSString *hooked_b64(id self, SEL cmd, NSDataBase64EncodingOptions opt) {
     if (dh_capture_sub_enabled(DH_CAP_DATAFLOW) && df_active() && r.length) {
         NSData *src = (NSData *)self;
         df_log(@"base64编码", df_bytes(src.bytes, src.length),
-               [r dataUsingEncoding:NSUTF8StringEncoding], @"base64EncodedStringWithOptions:");
+               df_utf8(r), @"base64EncodedStringWithOptions:");
     }
     return r;
 }
@@ -148,7 +164,7 @@ static NSString *hooked_pctenc(id self, SEL cmd, NSCharacterSet *cs) {
     NSString *r = orig_pctenc(self, cmd, cs);
     if (dh_capture_sub_enabled(DH_CAP_DATAFLOW) && df_active() &&
         r.length > 0 && r.length < 8192) {
-        df_log(@"URL编码", [r dataUsingEncoding:NSUTF8StringEncoding], nil, @"stringByAddingPercentEncoding");
+        df_log(@"URL编码", df_utf8(r), nil, @"stringByAddingPercentEncoding");
     }
     return r;
 }

@@ -10,6 +10,23 @@
 // 仅供调试时在可信网络上使用.
 
 #import <Foundation/Foundation.h>
+
+// hook 换掉了 -[NSString dataUsingEncoding:] 的 IMP; 服务路径若在 hook 调用栈上,
+// 再调该方法会递归。统一用 CF 的 C 接口取 UTF8 bytes。
+static NSData *dh_srv_utf8(NSString *s) {
+    if (!s) return nil;
+    CFStringRef cs = (__bridge CFStringRef)s;
+    CFIndex len = CFStringGetLength(cs);
+    if (len == 0) return nil;
+    CFIndex need = 0;
+    CFStringGetBytes(cs, CFRangeMake(0, len), kCFStringEncodingUTF8, 0, false, NULL, 0, &need);
+    if (need <= 0) return nil;
+    NSMutableData *md = [NSMutableData dataWithLength:(NSUInteger)need];
+    CFIndex n = 0;
+    CFStringGetBytes(cs, CFRangeMake(0, len), kCFStringEncodingUTF8, 0, false,
+                     [md mutableBytes], need, &n);
+    return md;
+}
 #import <sys/socket.h>
 #import <sys/types.h>
 #import <sys/ioctl.h>
@@ -137,7 +154,7 @@ static void send_response_ex(int fd, int status, NSString *statusMsg, NSString *
     [headers appendString:@"Access-Control-Allow-Origin: *\r\n"];
     if (extraHeaders) [headers appendString:extraHeaders];
     [headers appendString:@"Connection: close\r\n\r\n"];
-    NSData *hd = [headers dataUsingEncoding:NSUTF8StringEncoding];
+    NSData *hd = dh_srv_utf8(headers);
     write_all(fd, hd.bytes, hd.length);
     if (body.length) write_all(fd, body.bytes, body.length);
 }
@@ -152,7 +169,7 @@ static void send_json(int fd, int status, id obj) {
     if (!body) {
         // fail-loud: 序列化失败返回 500 + 明确错误, 而不是静默回空让客户端以为「无数据」.
         DH_ERR(@"JSON 序列化失败: %@", jerr.localizedDescription);
-        NSData *eb = [@"{\"error\":\"json encode failed\"}" dataUsingEncoding:NSUTF8StringEncoding];
+        NSData *eb = dh_srv_utf8(@"{\"error\":\"json encode failed\"}");
         send_response(fd, 500, @"Error", @"application/json; charset=utf-8", eb);
         return;
     }
@@ -160,7 +177,7 @@ static void send_json(int fd, int status, id obj) {
 }
 
 static void send_text(int fd, int status, NSString *msg) {
-    NSData *body = [(msg ?: @"") dataUsingEncoding:NSUTF8StringEncoding];
+    NSData *body = dh_srv_utf8((msg ?: @""));
     send_response(fd, status, status == 200 ? @"OK" : @"Error", @"text/plain; charset=utf-8", body);
 }
 
@@ -382,7 +399,7 @@ static void handle_settings_export(int fd) {
     });
 }
 static void handle_settings_import(int fd, NSString *body) {
-    NSData *data = [body dataUsingEncoding:NSUTF8StringEncoding];
+    NSData *data = dh_srv_utf8(body);
     NSDictionary *root = data.length ? [NSJSONSerialization JSONObjectWithData:data options:0 error:nil] : nil;
     if (![root isKindOfClass:[NSDictionary class]]) { send_json(fd, 400, @{@"error": @"配置 JSON 无效"}); return; }
     NSMutableArray *applied = [NSMutableArray array];
@@ -426,7 +443,7 @@ static void handle_config_set(int fd, NSDictionary *q) {
 static void handle_logs_download(int fd, NSDictionary *q) {
     NSInteger cat = q[@"cat"] ? [q[@"cat"] integerValue] : -1;
     NSString *text = [[DHLogStore shared] exportTextForCategory:cat];
-    NSData *body = [text dataUsingEncoding:NSUTF8StringEncoding] ?: [NSData data];
+    NSData *body = dh_srv_utf8(text) ?: [NSData data];
     NSMutableString *headers = [NSMutableString string];
     [headers appendString:@"HTTP/1.1 200 OK\r\n"];
     [headers appendString:@"Content-Type: text/plain; charset=utf-8\r\n"];
@@ -434,7 +451,7 @@ static void handle_logs_download(int fd, NSDictionary *q) {
     [headers appendFormat:@"Content-Disposition: attachment; filename=iosdecrypthub-cat%ld.log\r\n", (long)cat];
     [headers appendString:@"Cache-Control: no-store\r\n"];
     [headers appendString:@"Connection: close\r\n\r\n"];
-    NSData *hd = [headers dataUsingEncoding:NSUTF8StringEncoding];
+    NSData *hd = dh_srv_utf8(headers);
     if (!write_all(fd, hd.bytes, hd.length)) return;
     write_all(fd, body.bytes, body.length);
 }
@@ -469,7 +486,7 @@ static void handle_diag(int fd, NSDictionary *q) {
 }
 static void handle_diag_download(int fd, NSDictionary *q) {
     NSInteger board = q[@"board"] ? [q[@"board"] integerValue] : -1;
-    NSData *body = [diag_text(board) dataUsingEncoding:NSUTF8StringEncoding] ?: [NSData data];
+    NSData *body = dh_srv_utf8(diag_text(board)) ?: [NSData data];
     NSMutableString *headers = [NSMutableString string];
     [headers appendString:@"HTTP/1.1 200 OK\r\n"];
     [headers appendString:@"Content-Type: text/plain; charset=utf-8\r\n"];
@@ -477,7 +494,7 @@ static void handle_diag_download(int fd, NSDictionary *q) {
     [headers appendFormat:@"Content-Disposition: attachment; filename=iosdecrypthub-diag-%ld.log\r\n", (long)board];
     [headers appendString:@"Cache-Control: no-store\r\n"];
     [headers appendString:@"Connection: close\r\n\r\n"];
-    NSData *hd = [headers dataUsingEncoding:NSUTF8StringEncoding];
+    NSData *hd = dh_srv_utf8(headers);
     if (!write_all(fd, hd.bytes, hd.length)) return;
     write_all(fd, body.bytes, body.length);
 }
@@ -507,7 +524,7 @@ static void handle_download(int fd) {
     [headers appendString:@"Content-Disposition: attachment; filename=decrypt_helper.log\r\n"];
     [headers appendString:@"Cache-Control: no-store\r\n"];
     [headers appendString:@"Connection: close\r\n\r\n"];
-    NSData *hd = [headers dataUsingEncoding:NSUTF8StringEncoding];
+    NSData *hd = dh_srv_utf8(headers);
     if (!write_all(fd, hd.bytes, hd.length)) return;
 
     // 64KB 分块, 逐段串流, 避免一次性把整个日志文件吃进内存
@@ -570,7 +587,7 @@ static void send_file_as_download(int fd, NSString *path, NSString *downloadName
     [headers appendFormat:@"Content-Disposition: attachment; filename=%@\r\n", downloadName];
     [headers appendString:@"Cache-Control: no-store\r\n"];
     [headers appendString:@"Connection: close\r\n\r\n"];
-    NSData *hd = [headers dataUsingEncoding:NSUTF8StringEncoding];
+    NSData *hd = dh_srv_utf8(headers);
     if (!write_all(fd, hd.bytes, hd.length)) return;
 
     NSFileHandle *fh = [NSFileHandle fileHandleForReadingAtPath:path];
@@ -727,13 +744,13 @@ static void send_mcp(int fd, id jsonObj, BOOL wantsSSE) {
     if (!jd) {
         DH_ERR(@"MCP JSON 序列化失败: %@", jerr.localizedDescription);
         send_response(fd, 500, @"Error", @"application/json; charset=utf-8",
-                      [@"{\"error\":\"json encode failed\"}" dataUsingEncoding:NSUTF8StringEncoding]);
+                      dh_srv_utf8(@"{\"error\":\"json encode failed\"}"));
         return;
     }
     if (wantsSSE) {
         NSString *js = [[NSString alloc] initWithData:jd encoding:NSUTF8StringEncoding] ?: @"{}";
-        NSData *frame = [[NSString stringWithFormat:@"event: message\ndata: %@\n\n", js]
-                         dataUsingEncoding:NSUTF8StringEncoding];
+        NSData *frame = dh_srv_utf8(
+                         [NSString stringWithFormat:@"event: message\ndata: %@\n\n", js]);
         send_response_ex(fd, 200, @"OK", @"text/event-stream", frame, mcp_session_header());
     } else {
         send_response_ex(fd, 200, @"OK", @"application/json; charset=utf-8", jd, mcp_session_header());
@@ -742,7 +759,7 @@ static void send_mcp(int fd, id jsonObj, BOOL wantsSSE) {
 
 static void handle_mcp(int fd, NSString *body, BOOL wantsSSE) {
     NSError *jerr = nil;
-    id obj = [NSJSONSerialization JSONObjectWithData:[body dataUsingEncoding:NSUTF8StringEncoding]
+    id obj = [NSJSONSerialization JSONObjectWithData:dh_srv_utf8(body)
                                              options:0 error:&jerr];
     if (!obj) {
         send_mcp(fd, @{@"jsonrpc": @"2.0", @"id": [NSNull null],
@@ -916,7 +933,7 @@ static void handle_connection(int fd) {
             } else if ([path isEqualToString:@"/api/mcp"]) {
                 // MCP over Streamable HTTP: 本服务不提供 GET 主动推流, 按规范回 405。
                 send_response_ex(fd, 405, @"Method Not Allowed", @"text/plain; charset=utf-8",
-                                 [@"MCP endpoint accepts POST only" dataUsingEncoding:NSUTF8StringEncoding],
+                                 dh_srv_utf8(@"MCP endpoint accepts POST only"),
                                  @"Allow: POST, OPTIONS\r\n");
             } else {
                 send_text(fd, 404, @"not found");
@@ -952,7 +969,7 @@ static void handle_connection(int fd) {
             [h appendString:@"Access-Control-Allow-Methods: GET, POST, OPTIONS\r\n"];
             [h appendString:@"Access-Control-Allow-Headers: *\r\n"];
             [h appendString:@"Connection: close\r\n\r\n"];
-            NSData *hd = [h dataUsingEncoding:NSUTF8StringEncoding];
+            NSData *hd = dh_srv_utf8(h);
             write_all(fd, hd.bytes, hd.length);
         } else {
             send_text(fd, 405, @"method not allowed");

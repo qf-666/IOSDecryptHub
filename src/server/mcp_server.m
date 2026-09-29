@@ -4,6 +4,21 @@
 // 传输层 (HTTP/SSE/会话头) 在 http_server.m 的 handle_mcp 里。
 
 #import <Foundation/Foundation.h>
+
+static NSData *dh_srv_utf8(NSString *s) {
+    if (!s) return nil;
+    CFStringRef cs = (__bridge CFStringRef)s;
+    CFIndex len = CFStringGetLength(cs);
+    if (len == 0) return nil;
+    CFIndex need = 0;
+    CFStringGetBytes(cs, CFRangeMake(0, len), kCFStringEncodingUTF8, 0, false, NULL, 0, &need);
+    if (need <= 0) return nil;
+    NSMutableData *md = [NSMutableData dataWithLength:(NSUInteger)need];
+    CFIndex n = 0;
+    CFStringGetBytes(cs, CFRangeMake(0, len), kCFStringEncodingUTF8, 0, false,
+                     [md mutableBytes], need, &n);
+    return md;
+}
 #import <objc/runtime.h>
 #import <objc/message.h>
 #import <setjmp.h>
@@ -894,7 +909,7 @@ static NSDictionary *tool_search_memory(NSDictionary *args) {
 
     NSData *pat = nil;
     if ([args[@"string"] isKindOfClass:NSString.class])
-        pat = [args[@"string"] dataUsingEncoding:NSUTF8StringEncoding];
+        pat = dh_srv_utf8(args[@"string"]);
     else if ([args[@"pattern"] isKindOfClass:NSString.class])
         pat = DHDataFromHex(args[@"pattern"]);
     if (pat.length == 0) return tool_err(@"provide 'string' or 'pattern' (hex)");
