@@ -429,7 +429,8 @@ static DHLogEntry *dh_entry_from_journal(NSDictionary *m) {
 }
 
 - (NSUInteger)maxPerCategory {
-    __block NSUInteger n; dispatch_sync(_queue, ^{ n = self->_maxPerCategory; }); return n;
+    // 原子读, 不再 dispatch_sync (主线程刷新悬浮窗时调用会死锁)
+    return atomic_load_explicit((atomic_ullong *)&_maxPerCategory, memory_order_relaxed);
 }
 - (void)setMaxPerCategory:(NSUInteger)n {
     if (n == 0) return;
@@ -443,7 +444,7 @@ static DHLogEntry *dh_entry_from_journal(NSDictionary *m) {
     });
 }
 - (unsigned long long)maxLogFileBytes {
-    __block unsigned long long n; dispatch_sync(_queue, ^{ n = self->_maxLogFileBytes; }); return n;
+    return atomic_load_explicit((atomic_ullong *)&_maxLogFileBytes, memory_order_relaxed);
 }
 - (void)setMaxLogFileBytes:(unsigned long long)bytes {
     dispatch_async(_queue, ^{ self->_maxLogFileBytes = bytes; [self _saveCfg]; });
@@ -765,6 +766,8 @@ static NSMutableString *dh_entry_block(DHLogEntry *e) {
 }
 
 - (NSArray<DHLogEntry *> *)snapshot {
+    // hook 调用栈上禁止 dispatch_sync 等队列: hook 正持有队列写入, 同步派发会死锁。
+    if (dh_in_hook) return nil;
     __block NSArray *r = nil;
     dispatch_sync(_queue, ^{ r = [self _mergedAllLocked]; });
     return r;
@@ -772,6 +775,7 @@ static NSMutableString *dh_entry_block(DHLogEntry *e) {
 
 - (NSArray<DHLogEntry *> *)snapshotMatching:(NSString *)keyword
                                     category:(NSInteger)categoryOrMinusOne {
+    if (dh_in_hook) return nil;   // 同上: hook 内部不等队列
     __block NSArray *src = nil;
     dispatch_sync(_queue, ^{ src = [self _categorySliceLocked:categoryOrMinusOne]; });
     if (!keyword || keyword.length == 0) return src;
@@ -792,6 +796,7 @@ static NSMutableString *dh_entry_block(DHLogEntry *e) {
 }
 
 - (DHLogEntry *)entryWithSeq:(uint64_t)seq {
+    if (dh_in_hook) return nil;   // hook 内部不等队列, 避免死锁
     __block DHLogEntry *r = nil;
     dispatch_sync(_queue, ^{
         // 各桶倒着找, 命中率高 (用户多看最新)
@@ -816,16 +821,17 @@ static NSMutableString *dh_entry_block(DHLogEntry *e) {
 }
 
 - (NSUInteger)totalCount {
-    __block NSUInteger n;
-    dispatch_sync(_queue, ^{ n = (NSUInteger)self->_seqCounter; });
-    return n;
+    // 原子读, 不等队列 (悬浮窗主线程刷新会调)
+    return (NSUInteger)atomic_load_explicit(&_seqCounter, memory_order_relaxed);
 }
 
 - (NSUInteger)countForCategory:(DHCategory)cat {
+    // 只读计数不能 dispatch_sync 到 _queue —— 悬浮窗在主线程刷新时会连续调 6 次,
+    // 队列正被 hook 的写入堵着时, 同步派发会 __DISPATCH_WAIT_FOR_QUEUE__ 死锁,
+    // 触发 0x8badf00d 看门狗被系统 SIGKILL (已实测)。
+    // 计数只在 _queue 内写, 主线程只读: 原子读即可, 语义不变, 无锁。
     if (cat < 0 || cat > DHCategoryOther) return 0;
-    __block NSUInteger n;
-    dispatch_sync(_queue, ^{ n = self->_categoryCounts[cat]; });
-    return n;
+    return atomic_load_explicit((atomic_ullong *)&_categoryCounts[cat], memory_order_relaxed);
 }
 
 - (void)clearAll {
@@ -881,6 +887,7 @@ static NSMutableString *dh_entry_block(DHLogEntry *e) {
 
 - (NSArray<DHLogEntry *> *)snapshotNoiseMatching:(NSString *)keyword board:(NSInteger)board {
     if (board < 0 || board >= DHNoiseBoardCount) board = DHNoiseBoardCrypto;
+    if (dh_in_hook) return nil;   // hook 内部不等队列, 避免死锁
     __block NSArray *src = nil;
     dispatch_sync(_queue, ^{ src = [self->_noiseBuckets[board] copy]; });
     if (!keyword || keyword.length == 0) return src;
@@ -902,9 +909,8 @@ static NSMutableString *dh_entry_block(DHLogEntry *e) {
 
 - (NSUInteger)noiseCountForBoard:(NSInteger)board {
     if (board < 0 || board >= DHNoiseBoardCount) board = DHNoiseBoardCrypto;
-    __block NSUInteger n;
-    dispatch_sync(_queue, ^{ n = self->_noiseCount[board]; });
-    return n;
+    // 原子读, 不等队列
+    return atomic_load_explicit((atomic_ullong *)&_noiseCount[board], memory_order_relaxed);
 }
 
 - (void)clearNoiseForBoard:(NSInteger)board {
