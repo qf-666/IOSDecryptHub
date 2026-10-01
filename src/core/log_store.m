@@ -430,7 +430,7 @@ static DHLogEntry *dh_entry_from_journal(NSDictionary *m) {
 
 - (NSUInteger)maxPerCategory {
     // 原子读, 不再 dispatch_sync (主线程刷新悬浮窗时调用会死锁)
-    return atomic_load_explicit((atomic_ullong *)&_maxPerCategory, memory_order_relaxed);
+    return _maxPerCategory;   // 仅 _queue 内写, arm64 单次读原子, 不等队列
 }
 - (void)setMaxPerCategory:(NSUInteger)n {
     if (n == 0) return;
@@ -444,7 +444,7 @@ static DHLogEntry *dh_entry_from_journal(NSDictionary *m) {
     });
 }
 - (unsigned long long)maxLogFileBytes {
-    return atomic_load_explicit((atomic_ullong *)&_maxLogFileBytes, memory_order_relaxed);
+    return _maxLogFileBytes;  // 仅 _queue 内写, arm64 单次读原子, 不等队列
 }
 - (void)setMaxLogFileBytes:(unsigned long long)bytes {
     dispatch_async(_queue, ^{ self->_maxLogFileBytes = bytes; [self _saveCfg]; });
@@ -821,8 +821,9 @@ static NSMutableString *dh_entry_block(DHLogEntry *e) {
 }
 
 - (NSUInteger)totalCount {
-    // 原子读, 不等队列 (悬浮窗主线程刷新会调)
-    return (NSUInteger)atomic_load_explicit(&_seqCounter, memory_order_relaxed);
+    // 直接读: _seqCounter 仅在 _queue 内写且 8 字节对齐, arm64 上单次 ldr 是原子的。
+    // 不用 dispatch_sync —— 悬浮窗在主线程刷新时会调, hook 堵着队列会死锁被 SIGKILL。
+    return (NSUInteger)_seqCounter;
 }
 
 - (NSUInteger)countForCategory:(DHCategory)cat {
@@ -831,7 +832,7 @@ static NSMutableString *dh_entry_block(DHLogEntry *e) {
     // 触发 0x8badf00d 看门狗被系统 SIGKILL (已实测)。
     // 计数只在 _queue 内写, 主线程只读: 原子读即可, 语义不变, 无锁。
     if (cat < 0 || cat > DHCategoryOther) return 0;
-    return atomic_load_explicit((atomic_ullong *)&_categoryCounts[cat], memory_order_relaxed);
+    return _categoryCounts[cat];
 }
 
 - (void)clearAll {
@@ -910,7 +911,7 @@ static NSMutableString *dh_entry_block(DHLogEntry *e) {
 - (NSUInteger)noiseCountForBoard:(NSInteger)board {
     if (board < 0 || board >= DHNoiseBoardCount) board = DHNoiseBoardCrypto;
     // 原子读, 不等队列
-    return atomic_load_explicit((atomic_ullong *)&_noiseCount[board], memory_order_relaxed);
+    return _noiseCount[board];
 }
 
 - (void)clearNoiseForBoard:(NSInteger)board {
